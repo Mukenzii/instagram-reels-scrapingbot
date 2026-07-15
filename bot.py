@@ -1,0 +1,114 @@
+"""Telegram bot that scrapes Instagram reel stats via the Apify actor.
+
+Send it a reel URL, a profile URL, or just a username and it replies with
+each reel's owner username, likes, views and comment count.
+"""
+
+import asyncio
+import html
+import logging
+
+from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+from aiogram.filters import CommandStart
+from aiogram.types import Message
+
+from apify_scraper import ApifyError, parse_reel, scrape_reels
+from config import BOT_TOKEN
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+dp = Dispatcher()
+
+WELCOME = (
+    "👋 <b>Instagram Reel Scraper</b>\n\n"
+    "Menga reel havolasini, profil havolasini yoki oddiy username yuboring — "
+    "men har bir reel uchun quyidagilarni qaytaraman:\n"
+    "• 👤 account username\n"
+    "• ❤️ layklar soni\n"
+    "• 👁 ko‘rishlar (views) soni\n"
+    "• 💬 izohlar soni\n\n"
+    "<b>Misollar:</b>\n"
+    "<code>https://www.instagram.com/reel/DX7lzTOJ1p6/</code>\n"
+    "<code>nasa</code>"
+)
+
+
+def _fmt(value) -> str:
+    """Format a number with thousands separators, or pass strings through."""
+    if isinstance(value, int):
+        return f"{value:,}".replace(",", " ")
+    return str(value) if value is not None else "—"
+
+
+def format_reel(reel: dict, index: int, total: int) -> str:
+    header = f"🎬 <b>Reel {index}/{total}</b>" if total > 1 else "🎬 <b>Reel</b>"
+    name = html.escape(reel["username"])
+    lines = [
+        header,
+        f"👤 <b>Username:</b> @{name}",
+        f"❤️ <b>Layklar:</b> {_fmt(reel['likes'])}",
+        f"👁 <b>Ko‘rishlar:</b> {_fmt(reel['views'])}",
+    ]
+    # Only show plays separately when it's a distinct number from views
+    # (in the common case views falls back to plays, so they'd be identical).
+    if reel["plays"] is not None and reel["plays"] != reel["views"]:
+        lines.append(f"▶️ <b>Ijro (plays):</b> {_fmt(reel['plays'])}")
+    lines.append(f"💬 <b>Izohlar:</b> {_fmt(reel['comments'])}")
+    if reel["url"]:
+        lines.append(f"🔗 {html.escape(reel['url'])}")
+    return "\n".join(lines)
+
+
+@dp.message(CommandStart())
+async def on_start(message: Message) -> None:
+    await message.answer(WELCOME)
+
+
+@dp.message(F.text)
+async def on_text(message: Message) -> None:
+    target = message.text.strip()
+    if not target:
+        await message.answer("Iltimos, reel havolasi yoki username yuboring.")
+        return
+
+    status = await message.answer("⏳ Ma'lumot yig‘ilmoqda, biroz kuting...")
+
+    try:
+        items = await scrape_reels(target)
+    except ApifyError as exc:
+        await status.edit_text(f"⚠️ {html.escape(str(exc))}")
+        return
+    except asyncio.TimeoutError:
+        await status.edit_text("⏱ So‘rov juda uzoq davom etdi. Keyinroq urinib ko‘ring.")
+        return
+    except Exception:
+        logger.exception("Unexpected error while scraping %s", target)
+        await status.edit_text("❌ Kutilmagan xatolik yuz berdi. Keyinroq urinib ko‘ring.")
+        return
+
+    if not items:
+        await status.edit_text(
+            "🔍 Hech narsa topilmadi. Havola/username to‘g‘ri va profil ochiq (public) ekaniga ishonch hosil qiling."
+        )
+        return
+
+    reels = [parse_reel(item) for item in items]
+    await status.edit_text(f"✅ {len(reels)} ta reel topildi:")
+    for i, reel in enumerate(reels, start=1):
+        await message.answer(format_reel(reel, i, len(reels)), disable_web_page_preview=True)
+
+
+async def main() -> None:
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    logger.info("Bot ishga tushdi.")
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
