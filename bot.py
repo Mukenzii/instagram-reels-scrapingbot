@@ -15,7 +15,8 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message
 
 from apify_scraper import ApifyError, parse_reel, scrape_reels
-from config import BOT_TOKEN
+from config import BOT_TOKEN, NOTION_ENABLED
+from notion_sync import run_notion_poller
 
 logging.basicConfig(
     level=logging.INFO,
@@ -113,6 +114,13 @@ async def on_text(message: Message) -> None:
 async def main() -> None:
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     logger.info("Bot ishga tushdi.")
+
+    if NOTION_ENABLED:
+        # Run the Notion poller alongside Telegram polling.
+        asyncio.create_task(run_notion_poller())
+    else:
+        logger.info("Notion o‘chirilgan (NOTION_TOKEN/NOTION_DATABASE_ID yo‘q).")
+
     await dp.start_polling(bot)
 
 
