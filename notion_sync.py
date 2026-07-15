@@ -28,7 +28,8 @@ NOTION_API = "https://api.notion.com/v1"
 NOTION_VERSION = "2022-06-28"
 
 # Column names in the Notion database.
-TITLE_PROP = "Kontent nomi"   # where the reel link is pasted
+LINK_PROP = "Kontent linki"   # URL property where the reel link is pasted
+TITLE_PROP = "Kontent nomi"   # title (fallback source for the link)
 PROP_LIKES = "Layk"
 PROP_VIEWS = "Prosmotr"
 PROP_COMMENTS = "Kommentlar"
@@ -51,10 +52,25 @@ def _plain_text(rich: list) -> str:
     return "".join(part.get("plain_text", "") for part in rich)
 
 
+def _normalize(url: str) -> str:
+    """Notion may store a URL without a scheme (e.g. instagram.com/reel/..)."""
+    url = url.strip()
+    if url and not url.lower().startswith(("http://", "https://")):
+        url = "https://" + url
+    return url
+
+
 def _extract_link(page: dict) -> str | None:
-    """Return the Instagram URL found in the page title, if any."""
-    prop = page.get("properties", {}).get(TITLE_PROP, {})
-    text = _plain_text(prop.get("title", []))
+    """Return the Instagram URL from the link column, falling back to the title."""
+    props = page.get("properties", {})
+
+    # Primary: the dedicated URL property.
+    url = props.get(LINK_PROP, {}).get("url")
+    if url and "instagram.com" in url.lower():
+        return _normalize(url)
+
+    # Fallback: a link pasted into the title text.
+    text = _plain_text(props.get(TITLE_PROP, {}).get("title", []))
     match = _INSTA_URL_RE.search(text)
     return match.group(0) if match else None
 
