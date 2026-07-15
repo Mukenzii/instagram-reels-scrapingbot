@@ -60,6 +60,12 @@ def format_reel(reel: dict, index: int, total: int) -> str:
     if reel["plays"] is not None and reel["plays"] != reel["views"]:
         lines.append(f"▶️ <b>Ijro (plays):</b> {_fmt(reel['plays'])}")
     lines.append(f"💬 <b>Izohlar:</b> {_fmt(reel['comments'])}")
+    if reel.get("shares") is not None:
+        lines.append(f"🔄 <b>Ulashishlar:</b> {_fmt(reel['shares'])}")
+    if reel.get("er") is not None:
+        lines.append(f"📊 <b>ER:</b> {reel['er']}% <i>(views asosida)</i>")
+    else:
+        lines.append("📊 <b>ER:</b> hisoblab bo‘lmadi")
     if reel["url"]:
         lines.append(f"🔗 {html.escape(reel['url'])}")
     return "\n".join(lines)

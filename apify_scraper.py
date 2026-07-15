@@ -47,7 +47,8 @@ def parse_reel(item: dict) -> dict:
     Instagram sometimes hides like counts; the actor returns -1 in that case.
     """
     likes = item.get("likesCount")
-    likes_display = "yashirilgan" if likes in (None, -1) else likes
+    likes_hidden = likes in (None, -1)
+    likes_display = "yashirilgan" if likes_hidden else likes
 
     # Instagram reports reel "views" as the play count; videoViewCount is often
     # null, so fall back to videoPlayCount (what the IG UI shows as "views").
@@ -56,13 +57,30 @@ def parse_reel(item: dict) -> dict:
     if views in (None, -1):
         views = plays
 
+    comments = item.get("commentsCount")
+    # Shares are only present if the actor's paid includeSharesCount is enabled.
+    shares = item.get("sharesCount")
+    if shares is None:
+        shares = item.get("reshareCount")
+
+    # Engagement rate. The true formula uses saves + reach, but those are private
+    # Insights metrics not available from public scraping, so we approximate with
+    # (likes + comments + shares) / views. ER is None when we can't compute it
+    # (hidden likes or no view count).
+    er = None
+    if not likes_hidden and views:
+        interactions = likes + (comments or 0) + (shares or 0)
+        er = round(interactions / views * 100, 2)
+
     return {
         "username": item.get("ownerUsername") or "—",
         "full_name": item.get("ownerFullName") or "",
         "likes": likes_display,
         "views": views,
         "plays": plays,
-        "comments": item.get("commentsCount"),
+        "comments": comments,
+        "shares": shares,
+        "er": er,
         "url": item.get("url") or item.get("inputUrl") or "",
         "caption": (item.get("caption") or "").strip(),
     }
