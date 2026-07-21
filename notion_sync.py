@@ -35,6 +35,11 @@ PROP_VIEWS = "Prosmotr"
 PROP_COMMENTS = "Kommentlar"
 PROP_USERNAME = "Username"
 PROP_ER = "ER"
+# Records WHICH reel the stats came from (its shortcode). A row is re-scraped
+# only when this doesn't match the link currently in the row — so duplicated
+# rows and edited links get fresh data, while an untouched row is never
+# scraped twice.
+PROP_SYNC = "Sync"
 
 _INSTA_URL_RE = re.compile(r"https?://(?:www\.)?instagram\.com/[^\s]+", re.IGNORECASE)
 _TIMEOUT = aiohttp.ClientTimeout(total=60)
@@ -80,18 +85,38 @@ def _username_filled(page: dict) -> bool:
     return bool(_plain_text(prop.get("rich_text", [])).strip())
 
 
+_SHORTCODE_RE = re.compile(r"/(?:reel|reels|p|tv)/([A-Za-z0-9_-]+)", re.IGNORECASE)
+
+
+def _shortcode(url: str) -> str | None:
+    """The reel's id from its URL, e.g. .../reel/DXt9oHMqiyG/?... -> DXt9oHMqiyG"""
+    m = _SHORTCODE_RE.search(url)
+    return m.group(1) if m else None
+
+
+def _sync_value(page: dict) -> str:
+    prop = page.get("properties", {}).get(PROP_SYNC, {})
+    return _plain_text(prop.get("rich_text", [])).strip()
+
+
 async def _query_pending(session: aiohttp.ClientSession) -> list[dict]:
-    """Return pages whose Username column is empty (candidates to process)."""
+    """Return every row, so callers can decide what needs (re)scraping."""
     url = f"{NOTION_API}/databases/{NOTION_DATABASE_ID}/query"
-    payload = {
-        "filter": {"property": PROP_USERNAME, "rich_text": {"is_empty": True}},
-        "page_size": 50,
-    }
-    async with session.post(url, json=payload, headers=_headers()) as resp:
-        data = await resp.json()
-    if data.get("object") == "error":
-        raise RuntimeError(f"Notion query error: {data.get('message')}")
-    return data.get("results", [])
+    results: list[dict] = []
+    cursor = None
+    while True:
+        payload: dict = {"page_size": 100}
+        if cursor:
+            payload["start_cursor"] = cursor
+        async with session.post(url, json=payload, headers=_headers()) as resp:
+            data = await resp.json()
+        if data.get("object") == "error":
+            raise RuntimeError(f"Notion query error: {data.get('message')}")
+        results.extend(data.get("results", []))
+        if not data.get("has_more"):
+            break
+        cursor = data.get("next_cursor")
+    return results
 
 
 def _num(value) -> dict:
@@ -99,16 +124,20 @@ def _num(value) -> dict:
     return {"number": value if isinstance(value, (int, float)) else None}
 
 
-async def _write_stats(session: aiohttp.ClientSession, page_id: str, reel: dict) -> None:
+def _text(value: str) -> dict:
+    return {"rich_text": [{"text": {"content": value}}]}
+
+
+async def _write_stats(session: aiohttp.ClientSession, page_id: str,
+                       reel: dict, stamp: str) -> None:
     likes = reel["likes"] if isinstance(reel["likes"], int) else None
     properties = {
         PROP_LIKES: _num(likes),
         PROP_VIEWS: _num(reel["views"]),
         PROP_COMMENTS: _num(reel["comments"]),
         PROP_ER: _num(reel["er"]),
-        PROP_USERNAME: {
-            "rich_text": [{"text": {"content": reel["username"] or "—"}}]
-        },
+        PROP_USERNAME: _text(reel["username"] or "—"),
+        PROP_SYNC: _text(stamp),
     }
     url = f"{NOTION_API}/pages/{page_id}"
     async with session.patch(url, json={"properties": properties}, headers=_headers()) as resp:
@@ -117,9 +146,10 @@ async def _write_stats(session: aiohttp.ClientSession, page_id: str, reel: dict)
         raise RuntimeError(f"Notion update error: {data.get('message')}")
 
 
-async def _mark_failed(session: aiohttp.ClientSession, page_id: str, note: str) -> None:
-    """Write a marker into Username so a permanently-bad row isn't retried forever."""
-    properties = {PROP_USERNAME: {"rich_text": [{"text": {"content": note}}]}}
+async def _mark_failed(session: aiohttp.ClientSession, page_id: str, note: str,
+                       stamp: str | None) -> None:
+    """Mark a permanently-bad link so it isn't retried forever."""
+    properties = {PROP_USERNAME: _text(note), PROP_SYNC: _text(stamp or "")}
     url = f"{NOTION_API}/pages/{page_id}"
     try:
         async with session.patch(url, json={"properties": properties}, headers=_headers()):
@@ -134,8 +164,14 @@ async def _process_once(session: aiohttp.ClientSession) -> None:
         page_id = page["id"]
         link = _extract_link(page)
         if not link:
-            # No instagram link in the title yet — leave the row alone.
+            # No instagram link in the row yet — leave it alone.
             continue
+
+        code = _shortcode(link)
+        if code and _sync_value(page) == code:
+            # These stats already came from this exact reel — don't rescrape.
+            continue
+
         logger.info("Notion: processing %s -> %s", page_id, link)
         try:
             items = await scrape_reels(link)
@@ -152,12 +188,14 @@ async def _process_once(session: aiohttp.ClientSession) -> None:
             continue
 
         if not items:
-            await _mark_failed(session, page_id, "topilmadi")
+            await _mark_failed(session, page_id, "topilmadi", code)
             continue
 
         reel = parse_reel(items[0])
+        # Trust the reel the actor actually returned over the pasted URL.
+        stamp = items[0].get("shortCode") or code or ""
         try:
-            await _write_stats(session, page_id, reel)
+            await _write_stats(session, page_id, reel, stamp)
             logger.info("Notion: filled %s (@%s)", page_id, reel["username"])
         except Exception:
             logger.exception("Failed to write stats to %s", page_id)
