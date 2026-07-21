@@ -5,3 +5,9 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    # Docker's embedded resolver flakes on this host ("Temporary failure in
+    # name resolution"), which broke api.notion.com / api.telegram.org lookups.
+    # Use reliable public DNS instead.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8

@@ -8,8 +8,9 @@ RUN_SYNC_URL = (
     f"https://api.apify.com/v2/acts/{APIFY_ACTOR}/run-sync-get-dataset-items"
 )
 
-# run-sync can take a while for profiles with many reels, so keep a generous timeout.
-_TIMEOUT = aiohttp.ClientTimeout(total=180)
+# run-sync can take a while for profiles with many reels, so keep a generous
+# timeout. 180s was too tight — real runs hit it exactly and got cancelled.
+_TIMEOUT = aiohttp.ClientTimeout(total=420)
 
 
 class ApifyError(Exception):

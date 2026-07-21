@@ -142,6 +142,11 @@ async def _process_once(session: aiohttp.ClientSession) -> None:
         except ApifyError as exc:
             logger.warning("Apify failed for %s: %s", link, exc)
             continue  # transient — retry next poll
+        except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+            # Network/DNS blip or a slow actor run — retry on the next poll.
+            logger.warning("Scrape timed out/failed for %s (%s) — will retry", link,
+                           type(exc).__name__)
+            continue
         except Exception:
             logger.exception("Unexpected scrape error for %s", link)
             continue
@@ -169,6 +174,11 @@ async def run_notion_poller() -> None:
         while True:
             try:
                 await _process_once(session)
+            except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+                # DNS hiccup or Notion unreachable — log one line, not a
+                # traceback, and try again on the next cycle.
+                logger.warning("Notion unreachable (%s) — retrying in %ss",
+                               type(exc).__name__, NOTION_POLL_SECONDS)
             except Exception:
                 logger.exception("Notion poll cycle failed")
             await asyncio.sleep(NOTION_POLL_SECONDS)
