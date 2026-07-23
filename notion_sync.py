@@ -158,18 +158,29 @@ async def _mark_failed(session: aiohttp.ClientSession, page_id: str, note: str,
         logger.exception("Failed to write failure marker to %s", page_id)
 
 
-async def _process_once(session: aiohttp.ClientSession) -> None:
+async def _process_once(session: aiohttp.ClientSession, force: bool = False) -> dict:
+    """Scan the database once.
+
+    Normally a row is scraped only when its stats don't already match its link.
+    With ``force=True`` every row that has a link is (re)scraped and its data
+    overwritten — this is what the /update command uses.
+
+    Returns counts: {"updated", "failed", "skipped", "no_link"}.
+    """
+    counts = {"updated": 0, "failed": 0, "skipped": 0, "no_link": 0}
     pages = await _query_pending(session)
     for page in pages:
         page_id = page["id"]
         link = _extract_link(page)
         if not link:
             # No instagram link in the row yet — leave it alone.
+            counts["no_link"] += 1
             continue
 
         code = _shortcode(link)
-        if code and _sync_value(page) == code:
+        if not force and code and _sync_value(page) == code:
             # These stats already came from this exact reel — don't rescrape.
+            counts["skipped"] += 1
             continue
 
         logger.info("Notion: processing %s -> %s", page_id, link)
@@ -177,18 +188,22 @@ async def _process_once(session: aiohttp.ClientSession) -> None:
             items = await scrape_reels(link)
         except ApifyError as exc:
             logger.warning("Apify failed for %s: %s", link, exc)
+            counts["failed"] += 1
             continue  # transient — retry next poll
         except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
             # Network/DNS blip or a slow actor run — retry on the next poll.
             logger.warning("Scrape timed out/failed for %s (%s) — will retry", link,
                            type(exc).__name__)
+            counts["failed"] += 1
             continue
         except Exception:
             logger.exception("Unexpected scrape error for %s", link)
+            counts["failed"] += 1
             continue
 
         if not items:
             await _mark_failed(session, page_id, "topilmadi", code)
+            counts["failed"] += 1
             continue
 
         reel = parse_reel(items[0])
@@ -197,8 +212,20 @@ async def _process_once(session: aiohttp.ClientSession) -> None:
         try:
             await _write_stats(session, page_id, reel, stamp)
             logger.info("Notion: filled %s (@%s)", page_id, reel["username"])
+            counts["updated"] += 1
         except Exception:
             logger.exception("Failed to write stats to %s", page_id)
+            counts["failed"] += 1
+    return counts
+
+
+async def refresh_all() -> dict:
+    """Force-refresh every row that has a link (used by /update).
+
+    Opens its own session so it can run independently of the background poller.
+    """
+    async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
+        return await _process_once(session, force=True)
 
 
 async def run_notion_poller() -> None:

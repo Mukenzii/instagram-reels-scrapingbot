@@ -11,12 +11,15 @@ import logging
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart
-from aiogram.types import Message
+from aiogram.filters import Command, CommandStart
+from aiogram.types import BotCommand, Message
 
 from apify_scraper import ApifyError, parse_reel, scrape_reels
 from config import BOT_TOKEN, NOTION_ENABLED
-from notion_sync import run_notion_poller
+from notion_sync import refresh_all, run_notion_poller
+
+# Guards against two /update runs overlapping (double taps, several admins).
+_update_lock = asyncio.Lock()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,7 +39,8 @@ WELCOME = (
     "• 💬 izohlar soni\n\n"
     "<b>Misollar:</b>\n"
     "<code>https://www.instagram.com/reel/DX7lzTOJ1p6/</code>\n"
-    "<code>nasa</code>"
+    "<code>nasa</code>\n\n"
+    "🔄 /update — Notion jadvalidagi barcha havolalarni qayta yangilaydi."
 )
 
 
@@ -77,6 +81,39 @@ async def on_start(message: Message) -> None:
     await message.answer(WELCOME)
 
 
+@dp.message(Command("update"))
+async def on_update(message: Message) -> None:
+    """Force-refresh every reel link in the Notion database with fresh stats."""
+    if not NOTION_ENABLED:
+        await message.answer("⚠️ Notion ulanmagan (NOTION_TOKEN/NOTION_DATABASE_ID yo‘q).")
+        return
+
+    if _update_lock.locked():
+        await message.answer("⏳ Yangilash allaqachon ketmoqda, biroz kuting...")
+        return
+
+    async with _update_lock:
+        status = await message.answer(
+            "🔄 Barcha havolalar yangilanmoqda... (bir necha daqiqa olishi mumkin)"
+        )
+        try:
+            c = await refresh_all()
+        except Exception:
+            logger.exception("/update failed")
+            await status.edit_text("❌ Yangilashda xatolik yuz berdi. Keyinroq urinib ko‘ring.")
+            return
+
+    lines = [
+        "✅ <b>Yangilash tugadi</b>",
+        f"🔁 Yangilandi: {c['updated']}",
+    ]
+    if c["failed"]:
+        lines.append(f"⚠️ Xatolik: {c['failed']}")
+    if c["no_link"]:
+        lines.append(f"➖ Havolasiz qatorlar: {c['no_link']}")
+    await status.edit_text("\n".join(lines))
+
+
 @dp.message(F.text)
 async def on_text(message: Message) -> None:
     target = message.text.strip()
@@ -114,6 +151,13 @@ async def on_text(message: Message) -> None:
 async def main() -> None:
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     logger.info("Bot ishga tushdi.")
+
+    commands = [BotCommand(command="start", description="Botni ishga tushirish")]
+    if NOTION_ENABLED:
+        commands.append(
+            BotCommand(command="update", description="Notion havolalarini yangilash")
+        )
+    await bot.set_my_commands(commands)
 
     if NOTION_ENABLED:
         # Run the Notion poller alongside Telegram polling.
