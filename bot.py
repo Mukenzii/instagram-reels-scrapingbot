@@ -81,7 +81,7 @@ async def on_start(message: Message) -> None:
     await message.answer(WELCOME)
 
 
-@dp.message(Command("update"))
+@dp.message(Command("update", "upgrade", "refresh"))
 async def on_update(message: Message) -> None:
     """Force-refresh every reel link in the Notion database with fresh stats."""
     if not NOTION_ENABLED:
@@ -119,6 +119,14 @@ async def on_text(message: Message) -> None:
     target = message.text.strip()
     if not target:
         await message.answer("Iltimos, reel havolasi yoki username yuboring.")
+        return
+
+    # Unrecognised /command — don't try to scrape it as a username.
+    if target.startswith("/"):
+        await message.answer(
+            "❓ Noma'lum buyruq. Mavjud buyruqlar: /start, /update\n"
+            "Yoki reel havolasi / username yuboring."
+        )
         return
 
     status = await message.answer("⏳ Ma'lumot yig‘ilmoqda, biroz kuting...")
